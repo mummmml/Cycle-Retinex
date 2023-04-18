@@ -1,0 +1,168 @@
+#!/usr/bin/python3
+
+import argparse
+import sys
+import os
+
+import numpy as np
+import torchvision.transforms as transforms
+from torchvision.utils import save_image
+from torch.utils.data import DataLoader
+from torch.autograd import Variable
+import torch
+import os
+from PIL import Image
+
+os.environ['CUDA_VISIBLE_DEVICES'] = '1'
+
+from models import Generator,Generator1
+from models import DecomNet
+from models import RelightNet,RelightNet1
+from datasets import ImageDataset
+
+parser = argparse.ArgumentParser()
+parser.add_argument('--batchSize', type=int, default=1, help='size of the batches')
+parser.add_argument('--dataroot', type=str, default='dataset/', help='root directory of the dataset')
+parser.add_argument('--input_nc', type=int, default=3, help='number of channels of input data')
+parser.add_argument('--output_nc', type=int, default=3, help='number of channels of output data')
+parser.add_argument('--size', type=int, default=256, help='size of the data (squared assumed)')
+parser.add_argument('--cuda', action='store_true', help='use GPU computation')
+parser.add_argument('--n_cpu', type=int, default=8, help='number of cpu threads to use during batch generation')
+parser.add_argument('--generator_A2B', type=str, default='output_checkpoint_12.5/100000/netG_A2B.pth', help='A2B generator checkpoint file')
+parser.add_argument('--generator_B2A', type=str, default='output_checkpoint_12.5/100000/netG_B2A.pth', help='B2A generator checkpoint file')
+parser.add_argument('--decom_net', type=str, default='output_checkpoint_12.5/100000/Decom_net.pth', help='decom_net checkpoint file')
+parser.add_argument('--denoise_net', type=str, default='output_checkpoint_12.5/100000/Denoise_net.pth', help='denoise_net checkpoint file')
+opt = parser.parse_args()
+print(opt)
+
+if torch.cuda.is_available() and not opt.cuda:
+    print("WARNING: You have a CUDA device, so you should probably run with --cuda")
+
+###### Definition of variables ######
+# Networks
+###### Definition of variables ######
+# Networks
+netG_A2B = RelightNet()
+netG_B2A = RelightNet()
+Decom_net = DecomNet()
+Denoise_net = RelightNet1()
+
+
+if not opt.cuda:
+    netG_A2B.cuda()
+    netG_B2A.cuda()
+    Decom_net.cuda()
+    Denoise_net.cuda()
+    # print("asd")
+
+# Load state dicts
+netG_A2B.load_state_dict(torch.load(opt.generator_A2B))
+netG_B2A.load_state_dict(torch.load(opt.generator_B2A))
+Decom_net.load_state_dict(torch.load(opt.decom_net))
+Denoise_net.load_state_dict(torch.load(opt.denoise_net))
+
+# Set model's test mode
+netG_A2B.eval()
+netG_B2A.eval()
+Decom_net.eval()
+
+# Inputs & targets memory allocation
+Tensor = torch.cuda.FloatTensor if not opt.cuda else torch.Tensor
+input_A = Tensor(opt.batchSize, opt.input_nc, opt.size, opt.size)
+input_B = Tensor(opt.batchSize, opt.output_nc, opt.size, opt.size)
+
+# Dataset loader
+# transforms_ = [ transforms.Resize((int(opt.size),int(opt.size)), Image.BICUBIC),
+#                 transforms.ToTensor()]
+# transforms_ = [ transforms.ToTensor(),
+#                 transforms.Normalize((0.5,0.5,0.5), (0.5,0.5,0.5)) ]
+transforms_ = [ transforms.ToTensor()]
+dataloader = DataLoader(ImageDataset(opt.dataroot, transforms_=transforms_, mode='test'), 
+                        batch_size=opt.batchSize, shuffle=False, num_workers=opt.n_cpu)
+###################################
+
+###### Testing######
+output_path='result'
+
+# Create output dirs if they don't exist
+if not os.path.exists(output_path):
+    os.makedirs(output_path+'/A')
+    os.makedirs(output_path + '/B')
+
+def swap_dim(t):
+    t = t.swapaxes(0, 2)
+    tt = t.swapaxes(0, 1)
+    return tt
+
+
+def concate(I):
+    return torch.cat([I,I,I],dim=1)
+
+
+a_rand_list=np.random.rand(300*1020)/100
+
+
+for i, batch in enumerate(dataloader):
+    # Set model input
+    # print(batch['A'].shape)
+    # ToPIL=transforms.ToPILImage()
+    # real_A = batch['A'].squeeze().cpu().numpy()
+    # real_B = batch['B'].squeeze().cpu().numpy()
+    # # print(real_A_1.shape) #(3, 400, 600)
+    # # print(type(real_A_1)) #<class 'numpy.ndarray'>
+    # fake_B_0, fake_A_0 = enhance_patch(real_A, real_B, 0, 0)
+    # fake_B_1, fake_A_1 = enhance_patch(real_A, real_B, 0, 1)
+    # fake_B_2, fake_A_2 = enhance_patch(real_A, real_B, 1, 0)
+    # fake_B_3, fake_A_3 = enhance_patch(real_A, real_B, 1, 1)
+    #
+    # fake_A=fuse_patch(fake_A_0,fake_A_1,fake_A_2,fake_A_3)
+    # fake_B=fuse_patch(fake_B_0,fake_B_1,fake_B_2,fake_B_3)
+    real_A = batch['A'].cuda()
+    real_B = batch['B'].cuda()
+
+    with torch.no_grad():
+
+        real_A_R, real_A_L = Decom_net(real_A)  # R[:,3,:,:] L[:,1,:,:]
+        real_B_R, real_B_L = Decom_net(real_B)
+        real_A_L_3 = concate(real_A_L)
+        real_B_L_3 = concate(real_B_L)
+
+        fake_B_L = netG_A2B(real_A_L,real_A_R)
+        fake_B_R = Denoise_net(real_A_R)
+        fake_B_L_3 = concate(fake_B_L)
+        fake_B = fake_B_R * fake_B_L_3
+
+        fake_A_L = netG_B2A(real_B_L,real_B_R)
+        # fake_A_R = netG_B2A_R(real_B_R)
+        fake_A_L_3 = concate(fake_A_L)
+        noise = noise_produce(real_A, -0.25, a_rand_list[i]).cuda() * 1
+        fake_A=(real_B_R+noise).clamp(0.01,0.99)*fake_A_L_3
+
+        fake_A_R_o,fake_A_L_o=Decom_net(fake_A)
+        fake_A_L_o_3 = concate(fake_A_L_o)
+        fake_B_R_o, fake_B_L_o = Decom_net(fake_B)
+        fake_B_L_o_3 = concate(fake_B_L_o)
+
+        recovered_A_L = netG_B2A(fake_B_L_o, fake_B_R_o)
+        recovered_A_L_3 = concate(recovered_A_L)
+        recovered_A = recovered_A_L_3 * real_A_R
+
+        recovered_B_L = netG_A2B(fake_A_L_o, fake_A_R_o)
+        recovered_B_R = Denoise_net(fake_A_R_o)
+        recovered_B_L_3 = concate(recovered_B_L)
+        recovered_B = recovered_B_L_3 * recovered_B_R
+        #
+        # recovered_A_L = netG_B2A(fake_B_L_o, fake_B_R_o)
+        # recovered_A_L_3 = concate(recovered_A_L)
+        # recovered_A = recovered_A_L_3 * fake_B_R_o
+        # recovered_B_L = netG_A2B(fake_A_L_o, fake_A_R_o)
+        # recovered_B_L_3 = concate(recovered_B_L)
+        # recovered_B = recovered_B_L_3 * fake_A_R_o
+
+        # Save image files
+        save_image(fake_A, output_path+'/A/%04d.png' % (i+1))
+        save_image(fake_B, output_path+'/B/%04d.png' % (i+1))
+        sys.stdout.write('\rGenerated images %04d of %04d' % (i+1, len(dataloader)))
+
+sys.stdout.write('\n')
+###################################
